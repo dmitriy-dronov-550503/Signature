@@ -12,6 +12,7 @@
 #include <queue>
 #include <mutex>
 #include <thread>
+#include <sstream>
 
 #include "md5.h"
 #include <sha256.h>
@@ -63,6 +64,10 @@ private:
     std::mutex blocks_mutex;
     std::mutex hashes_mutex;
 
+    bool makeCalculation = true;
+
+    std::mutex log_mutex;
+
 public:
     double blocksCount;
 
@@ -81,6 +86,24 @@ public:
         }
     }
 
+    void run() {
+        std::thread rft(&SignatureGenerator::readFileThread, this);
+
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 12; i++)
+        {
+            threads.push_back(std::thread(&SignatureGenerator::calculateHashThread, this));
+        }
+        
+        std::thread wft(&SignatureGenerator::writeFileThread, this);
+        
+        for (auto& t : threads) t.join();
+
+        rft.join();
+        wft.join();
+
+    }
+
     // This thread is able to read block from the file and put them into queue
     void readFileThread() {
         try {
@@ -90,7 +113,9 @@ public:
                 blocks_mutex.lock();
                 blocks.push(BlockItem(i, buf));
                 blocks_mutex.unlock();
-                std::cout << "Reading block" << i << " out of " << blocksCount << std::endl;
+                log_mutex.lock();
+                std::cout << "Reading block " << i << " out of " << blocksCount << std::endl;
+                log_mutex.unlock();
             }
         }
         catch (std::exception& e) {
@@ -100,48 +125,70 @@ public:
 
     // This thread calculates hash for the block
     void calculateHashThread() {
-        if (!blocks.empty())
-        {
+        while (makeCalculation) {
             blocks_mutex.lock();
-            BlockItem bi = blocks.front();
-            blocks.pop();
-            blocks_mutex.unlock();
+            if (!blocks.empty()) {
+                BlockItem bi = blocks.front();
+                blocks.pop();
+                blocks_mutex.unlock();
 
-            uintmax_t number = bi.number;
-            std::vector<unsigned char> buf = bi.block;
+                uintmax_t number = bi.number;
+                std::vector<unsigned char> buf = bi.block;
 
-            std::cout << "Calculate hash for block " << number << std::endl;
+                log_mutex.lock();
+                std::cout << "Calculate hash for block " << number << std::endl;
+                log_mutex.unlock();
 
-            // Calculate SHA256 hash
-            CSHA256 hasher;
-            std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
+                // Calculate SHA256 hash
+                CSHA256 hasher;
+                std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
 
-            hasher.Reset();
-            hasher.Write(buf.data(), blockSize);
-            hasher.Finalize(hash.data());
+                hasher.Reset();
+                hasher.Write(buf.data(), blockSize);
+                hasher.Finalize(hash.data());
 
-            number = rand() % 1000; // !!! TODO: Remove it
+                //number = rand() % 1000; // !!! TODO: Remove it
 
-            hashes_mutex.lock();
-            hashes.push(HashItem(number, hash));
-            hashes_mutex.unlock();
+                hashes_mutex.lock();
+                hashes.push(HashItem(number, hash));
+                hashes_mutex.unlock();
+            }
+            else
+            {
+                blocks_mutex.unlock();
+            }
         }
     }
 
     // This thread pops hashes and writes them to the output file
     void writeFileThread() {
-        if (!hashes.empty()) {
+        bool processingFinished = false;
+        double blocksLeft = blocksCount-1;
+        do {
             hashes_mutex.lock();
-            HashItem hi = hashes.top();
-            hashes.pop();
-            hashes_mutex.unlock();
+            if (!hashes.empty()) {
+                HashItem hi = hashes.top();
+                hashes.pop();
+                hashes_mutex.unlock();
 
-            uintmax_t number = hi.number;
-            std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash = hi.hash;
+                uintmax_t number = hi.number;
+                std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash = hi.hash;
 
-            outputFile.write((char*)hash.data(), CSHA256::OUTPUT_SIZE);
-            std::cout << number / blocksCount * 100 << " %" << std::endl;
-        }
+                outputFile.seekp(number * CSHA256::OUTPUT_SIZE);
+                outputFile.write((char*)hash.data(), CSHA256::OUTPUT_SIZE);
+                log_mutex.lock();
+                std::cout << "Writing block " << number << " out of " << blocksCount << " Progress: " << (blocksCount - blocksLeft) / blocksCount * 100 << " %" << std::endl;
+                log_mutex.unlock();
+                blocksLeft--;
+                if (number == blocksCount - 1) {
+                    processingFinished = true;
+                }
+            }
+            else {
+                hashes_mutex.unlock();
+            }
+        } while (!processingFinished);
+        makeCalculation = false;
     }
 
     ~SignatureGenerator() {
@@ -201,16 +248,15 @@ int main(int argc, char** argv)
 
         SignatureGenerator sg(inputFilePath, outputFilePath, blockSize);
 
-        sg.readFileThread();
+        sg.run();
 
-        for (int i = 0; i < sg.blocksCount; ++i) {
+        /*sg.readFileThread();
+
+        for (int i = 0; i < sg.blocksCount; i++) {
             sg.calculateHashThread();
         }
 
-        for (int i = 0; i < sg.blocksCount; ++i) {
-            sg.writeFileThread();
-        }
-
+        sg.writeFileThread();*/
     }
     catch (std::exception& e) {
         std::wcerr << "error: " << e.what() << "\n";
