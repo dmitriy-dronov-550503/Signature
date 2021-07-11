@@ -2,7 +2,6 @@
 #include <boost/lambda/lambda.hpp>
 #include <boost/program_options.hpp>
 #include <boost/thread/thread.hpp>
-#include <boost/interprocess/sync/named_semaphore.hpp>
 #include <iostream>
 #include <iterator>
 #include <algorithm>
@@ -16,6 +15,7 @@
 #include <thread>
 
 #include <sha256.h>
+#include "Pool.h"
 
 
 namespace po = boost::program_options;
@@ -24,33 +24,7 @@ namespace po = boost::program_options;
 #define MB (KB * KB)
 #define MAX_CORES 12
 
-template<typename T>
-class Pool
-{
-private:
-    std::queue<std::shared_ptr<T>> items;
-    std::mutex poolMutex;
-
-public:
-
-    std::shared_ptr<T> allocate() {
-        std::shared_ptr<T> item;
-        poolMutex.lock();
-        if (!items.empty())
-        {
-            item = items.front();
-            items.pop();
-        }
-        poolMutex.unlock();
-        return item;
-    }
-
-    void release(std::shared_ptr<T> item) {
-        poolMutex.lock();
-        items.push(item);
-        poolMutex.unlock();
-    }
-};
+#define LOGGING_ENABLED 1
 
 struct BlockItem
 {
@@ -80,7 +54,7 @@ private:
     const size_t blockSize;
     uintmax_t inputFileSize;
     
-    Pool<BlockItem> blockPool;
+    PoolBlocking<BlockItem> blockPool;
     std::queue<std::shared_ptr<BlockItem>> blocks;
     std::vector<HashItem> hashes;
     std::mutex blocks_mutex;
@@ -99,7 +73,8 @@ public:
 
     SignatureGenerator2() = delete;
 
-    SignatureGenerator2(std::string inputFilePath, std::string outputFilePath, size_t bSize) : blockSize(bSize) {
+    SignatureGenerator2(std::string inputFilePath, std::string outputFilePath, size_t bSize) 
+        : blockSize(bSize) {
         inputFile.open(inputFilePath, std::ios::binary);
         outputFile.open(outputFilePath, std::ios::out | std::ios::trunc | std::ios::binary);
         inputFileSize = std::filesystem::file_size(inputFilePath);
@@ -115,15 +90,14 @@ public:
             throw std::exception("Not enough disk space for creating signature file");
         }
 
+        blockPool.init("mySem", maxNumberOfCores * 4);
+        
         hashes.resize(blocksCount);
 
         for (int i = 0; i < maxNumberOfCores * 4; ++i) {
             auto block = std::make_shared<BlockItem>(i, blockSize);
             blockPool.release(block);
         }
-
-        boost::interprocess::named_semaphore::remove(semaphoreName);
-        boost::interprocess::named_semaphore semaphore(boost::interprocess::create_only_t(), semaphoreName, maxNumberOfCores * 4);
     }
 
     void run() {
@@ -149,28 +123,25 @@ public:
 
     // This thread is able to read block from the file and put them into queue
     void readFileThread() {
-        boost::interprocess::named_semaphore semaphore(boost::interprocess::open_only_t(), semaphoreName);
         try {
             for (int i = 0; i < blocksCount; ++i) {
                 auto block = blockPool.allocate();
-                if (block)
-                {
-                    block->number = i;
-                    inputFile.read((char*)block->block.data(), blockSize);
+#if LOGGING_ENABLED
+                log_mutex.lock();
+                std::cout << "Reading block " << i + 1 << " out of " << blocksCount << std::endl;
+                log_mutex.unlock();
+#endif
 
-                    blocks_mutex.lock();
-                    blocks.push(block);
-                    blocks_mutex.unlock();
+                block->number = i;
+                auto bytesLeft = inputFileSize - inputFile.tellg();
+                if (bytesLeft < blockSize) {
+                    memset(block->block.data(), 0, block->block.size());
+                }
+                inputFile.read((char*)block->block.data(), blockSize);
 
-                    log_mutex.lock();
-                    std::cout << "Reading block " << i << " out of " << blocksCount << std::endl;
-                    log_mutex.unlock();
-                    semaphore.wait();
-                }
-                else
-                {
-                    i--;
-                }
+                blocks_mutex.lock();
+                blocks.push(block);
+                blocks_mutex.unlock();
             }
         }
         catch (std::exception& e) {
@@ -178,11 +149,8 @@ public:
         }
     }
 
-
-
     // This thread calculates hash for the block
     void calculateHashThread() {
-        boost::interprocess::named_semaphore semaphore(boost::interprocess::open_only_t(), semaphoreName);
         while (makeCalculation) {
             blocks_mutex.lock();
             if (!blocks.empty()) {
@@ -192,9 +160,11 @@ public:
 
                 auto number = bi->number;
 
+#if LOGGING_ENABLED
                 log_mutex.lock();
                 std::cout << "Calculate hash for block " << number << std::endl;
                 log_mutex.unlock();
+#endif
 
                 auto& hash = hashes[number];
 
@@ -205,9 +175,7 @@ public:
                 hasher.Finalize(hash.hash.data());
 
                 hash.ready = true;
-                memset(bi->block.data(), 0, bi->block.size()); // TODO: improve
                 blockPool.release(bi);
-                semaphore.post();
             }
             else {
                 blocks_mutex.unlock();
@@ -221,9 +189,26 @@ public:
             if (hashes[i].ready) {
                 outputFile.write((char*)hashes[i].hash.data(), CSHA256::OUTPUT_SIZE);
 
+#if LOGGING_ENABLED
                 log_mutex.lock();
                 std::cout << "Writing block " << i + 1 << " out of " << blocksCount << " Progress: " << ((double)i + 1) / blocksCount * 100 << " %" << std::endl;
                 log_mutex.unlock();
+#else
+                float progress = i / (blocksCount - 1);
+                int barWidth = 70;
+
+                std::stringstream ss;
+                ss << "[";
+                int pos = barWidth * progress;
+                for (int i = 0; i < barWidth; ++i) {
+                    if (i < pos) ss << "=";
+                    else if (i == pos) ss << ">";
+                    else ss << " ";
+                }
+                ss << "] " << int(progress * 100.0) << " %\r";
+                std::cout << ss.str();
+                std::cout.flush();
+#endif
             }
             else {
                 i--;

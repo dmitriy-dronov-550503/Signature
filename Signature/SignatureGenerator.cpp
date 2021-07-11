@@ -1,10 +1,136 @@
 #include "SignatureGenerator.h"
+#include <filesystem>
 
-SignatureGenerator::SignatureGenerator(std::string inputFilePath, std::string outputFilePath, unsigned int blockSize) :
-    blockSize(blockSize)
+void SignatureGenerator::ReadFileThread()
+{
+    for (int i = 0; i < blocksCount; ++i) {
+        auto block = blocksPool.allocate();
+
+        block->number = i;
+        auto bytesLeft = inputFileSize - inputFile.tellg();
+        if (bytesLeft < blockSize) {
+            memset(block->block.data(), 0, block->block.size());
+        }
+        inputFile.read(reinterpret_cast<char*>(block->block.data()), blockSize);
+
+        {
+            std::lock_guard<std::mutex> lock(blockQSync);
+            blockQ.push(block);
+        }
+    }
+}
+
+void SignatureGenerator::WriteFileThread()
+{
+    for (int i = 0; i < blocksCount; ++i) {
+        if (hashQ[i].ready) {
+            outputFile.write((char*)hashQ[i].hash.data(), HASH_SIZE);
+            ShowProgress(i / (blocksCount - 1));
+        }
+        else {
+            i--;
+            std::this_thread::yield();
+        }
+    }
+    writeCompleted = true;
+}
+
+void SignatureGenerator::HashingThread()
+{
+    std::shared_ptr<Block> block;
+
+    while (!writeCompleted) {
+        
+        {
+            std::lock_guard<std::mutex> lock(blockQSync);
+            if (!blockQ.empty()) {
+                block = blockQ.front();
+                blockQ.pop();
+            }
+            else {
+                block.reset();
+            }
+        }
+
+        if (block) {
+            auto num = block->number;
+            auto& hash = hashQ[num];
+
+            Hasher hasher;
+            hasher.Reset();
+            hasher.Write(block->block.data(), blockSize);
+            hasher.Finalize(hash.hash.data());
+
+            hash.ready = true;
+            blocksPool.release(block);
+        }
+    }
+}
+
+void SignatureGenerator::ShowProgress(float progress)
+{
+    static const unsigned int BAR_WIDTH = 70UL;
+    std::stringstream ss;
+    ss << "[";
+    int pos = BAR_WIDTH * progress;
+    for (int i = 0; i < BAR_WIDTH; ++i) {
+        if (i < pos) ss << "=";
+        else if (i == pos) ss << ">";
+        else ss << " ";
+    }
+    ss << "] " << int(progress * 100.0) << " %\r";
+    std::cout << ss.str();
+    std::cout.flush();
+}
+
+SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const std::string outputFilePath, const unsigned int blockSize) :
+    blockSize(blockSize) 
 {
     inputFile.open(inputFilePath, std::ios::in | std::ios::binary);
     if (!inputFile) throw std::exception("Cannot find input file");
     outputFile.open(outputFilePath, std::ios::out | std::ios::trunc | std::ios::binary);
     if (!outputFile) throw std::exception("Cannot create output file");
+
+    inputFileSize = std::filesystem::file_size(inputFilePath);
+    const uint64_t outputFileSize = blocksCount * CSHA256::OUTPUT_SIZE;
+    blocksCount = static_cast<uint64_t>(ceil((double)inputFileSize / (double)blockSize));
+    const unsigned int cores = std::thread::hardware_concurrency();
+    numOfCores = (cores == 0) ? DEFAULT_NUM_OF_CORES : cores;
+    
+    blocksPool.init("SignGen_semaphore", numOfCores * Q_RESERVATION_MULT);
+
+    for (int i = 0; i < numOfCores * Q_RESERVATION_MULT; ++i) {
+        auto block = std::make_shared<Block>(i, blockSize);
+        blocksPool.release(block); // Add block to the pool
+    }
+
+    hashQ.resize(blocksCount);
+
+    const auto si = std::filesystem::space(outputFilePath);
+    if (si.available < outputFileSize) {
+        throw std::exception("Not enough disk space for creating signature file");
+    }
+}
+
+SignatureGenerator::~SignatureGenerator()
+{
+    outputFile.close();
+    inputFile.close();
+}
+
+void SignatureGenerator::Generate()
+{
+    std::thread fileReader(&SignatureGenerator::ReadFileThread, this);
+    std::thread fileWriter(&SignatureGenerator::WriteFileThread, this);
+
+    std::vector<std::thread> hashProcessors;
+    for (uint32_t i = 0; i < numOfCores; ++i)
+    {
+        hashProcessors.push_back(std::move(std::thread(&SignatureGenerator::HashingThread, this)));
+    }
+
+    for (auto& hp : hashProcessors) hp.join();
+
+    fileWriter.join();
+    fileReader.join();
 }
