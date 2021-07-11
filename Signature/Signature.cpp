@@ -24,32 +24,49 @@ namespace po = boost::program_options;
 #define MB (KB * KB)
 #define MAX_CORES 12
 
+template<typename T>
+class Pool
+{
+private:
+    std::queue<std::shared_ptr<T>> items;
+    std::mutex poolMutex;
+
+public:
+
+    std::shared_ptr<T> allocate() {
+        std::shared_ptr<T> item;
+        poolMutex.lock();
+        if (!items.empty())
+        {
+            item = items.front();
+            items.pop();
+        }
+        poolMutex.unlock();
+        return item;
+    }
+
+    void release(std::shared_ptr<T> item) {
+        poolMutex.lock();
+        items.push(item);
+        poolMutex.unlock();
+    }
+};
 
 struct BlockItem
 {
     uintmax_t number;
     std::vector<unsigned char> block;
 
-    BlockItem(uintmax_t n, std::vector<unsigned char> b)
-        : number(n), block(b) {}
+    BlockItem(uintmax_t n, uintmax_t blockSize)
+        : number(n) {
+        block.resize(blockSize);
+    }
 };
 
 struct HashItem
 {
-    uintmax_t number;
+    bool isReady = false;
     std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
-
-    HashItem(uintmax_t n, std::array<unsigned char, CSHA256::OUTPUT_SIZE> h)
-        : number(n), hash(h) {}
-};
-
-class HashItemCompare
-{
-public:
-    bool operator() (const HashItem& left, const HashItem& right)
-    {
-        return left.number > right.number;
-    }
 };
 
 class SignatureGenerator2
@@ -60,8 +77,9 @@ private:
     const size_t blockSize;
     uintmax_t inputFileSize;
     
-    std::queue<BlockItem> blocks;
-    std::priority_queue<HashItem, std::vector<HashItem>, HashItemCompare> hashes;
+    Pool<BlockItem> blockPool;
+    std::queue<std::shared_ptr<BlockItem>> blocks;
+    std::vector<HashItem> hashes;
     std::mutex blocks_mutex;
     std::mutex hashes_mutex;
 
@@ -87,14 +105,22 @@ public:
         inputFileSize = std::filesystem::file_size(inputFilePath);
         blocksCount = ceil((double)inputFileSize / (double)blockSize);
 
+        
+        const unsigned int cores = std::thread::hardware_concurrency();
+        maxNumberOfCores = (cores == 0) ? defaultNumOfCores : cores;
+
         const uintmax_t outputFileSize = blocksCount * CSHA256::OUTPUT_SIZE;
         const auto si = std::filesystem::space(outputFilePath);
         if (si.available < outputFileSize) {
             throw std::exception("Not enough disk space for creating signature file");
         }
 
-        const unsigned int cores = std::thread::hardware_concurrency();
-        maxNumberOfCores = (cores == 0) ? defaultNumOfCores : cores;
+        hashes.resize(blocksCount);
+
+        for (int i = 0; i < maxNumberOfCores * 4; ++i) {
+            auto block = std::make_shared<BlockItem>(i, blockSize);
+            blockPool.release(block);
+        }
 
         boost::interprocess::named_semaphore::remove(semaphoreName);
         boost::interprocess::named_semaphore semaphore(boost::interprocess::create_only_t(), semaphoreName, maxNumberOfCores * 4);
@@ -125,16 +151,26 @@ public:
     void readFileThread() {
         boost::interprocess::named_semaphore semaphore(boost::interprocess::open_only_t(), semaphoreName);
         try {
-            for (int i = 0; i < blocksCount; ++i) {
-                std::vector<unsigned char> buf(blockSize);
-                inputFile.read((char*)buf.data(), blockSize);
-                blocks_mutex.lock();
-                blocks.push(BlockItem(i, buf));
-                blocks_mutex.unlock();
-                log_mutex.lock();
-                std::cout << "Reading block " << i << " out of " << blocksCount << std::endl;
-                log_mutex.unlock();
-                semaphore.wait();
+            for (int i = 0; i < blocksCount; i++) {
+                auto block = blockPool.allocate();
+                if (block)
+                {
+                    block->number = i;
+                    inputFile.read((char*)block->block.data(), blockSize);
+
+                    blocks_mutex.lock();
+                    blocks.push(block);
+                    blocks_mutex.unlock();
+
+                    log_mutex.lock();
+                    std::cout << "Reading block " << i << " out of " << blocksCount << std::endl;
+                    log_mutex.unlock();
+                    semaphore.wait();
+                }
+                else
+                {
+                    i--;
+                }
             }
         }
         catch (std::exception& e) {
@@ -142,13 +178,7 @@ public:
         }
     }
 
-    DWORD GetCurrentProcessorNumberXP(void)
-    {
-        _asm {mov eax, 1}
-        _asm {cpuid}
-        _asm {shr ebx, 24}
-        _asm {mov eax, ebx}
-    }
+
 
     // This thread calculates hash for the block
     void calculateHashThread() {
@@ -156,41 +186,30 @@ public:
         while (makeCalculation) {
             blocks_mutex.lock();
             if (!blocks.empty()) {
-                BlockItem bi = blocks.front();
+                auto bi = blocks.front();
                 blocks.pop();
                 blocks_mutex.unlock();
 
-                uintmax_t number = bi.number;
-                std::vector<unsigned char> buf = bi.block;
-
                 log_mutex.lock();
-                std::cout << "Calculate hash for block " << number << std::endl;
-                std::cout << "Thread #" << std::this_thread::get_id() << ": on CPU " << GetCurrentProcessorNumberXP() << "\n";
+                std::cout << "Calculate hash for block " << bi->number << std::endl;
                 log_mutex.unlock();
 
                 // Calculate SHA256 hash
                 CSHA256 hasher;
-                std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
-
                 hasher.Reset();
-                hasher.Write(buf.data(), blockSize);
-                hasher.Finalize(hash.data());
-
-                //number = rand() % 1000; // !!! TODO: Remove it
+                hasher.Write(bi->block.data(), blockSize);
 
                 hashes_mutex.lock();
-                hashes.push(HashItem(number, hash));
+                auto& hash = hashes[bi->number];
+                hasher.Finalize(hash.hash.data());
+                hashes[bi->number].isReady = true;
                 hashes_mutex.unlock();
 
+                memset(bi->block.data(), 0, bi->block.size());
+                blockPool.release(bi);
                 semaphore.post();
-
-                {
-                    boost::mutex::scoped_lock lock(m_mutex);
-                    cv.notify_all();
-                }
             }
-            else
-            {
+            else {
                 blocks_mutex.unlock();
             }
         }
@@ -198,40 +217,21 @@ public:
 
     // This thread pops hashes and writes them to the output file
     void writeFileThread() {
-        bool processingFinished = false;
-        uintmax_t currentBlock = 0;
-        double blocksLeft = blocksCount - 1;
-        do {
+        for (int i = 0; i < blocksCount; i++) {
             hashes_mutex.lock();
-            if (!hashes.empty()) {
-                HashItem hi = hashes.top();
-
-                if (currentBlock != hi.number) {
-                    std::cout << "====== GOT WRONG SEQUENCE ======" << std::endl;
-                    hashes_mutex.unlock();
-                    boost::mutex::scoped_lock lock(m_mutex);
-                    cv.wait(lock);
-                    continue;
-                }
-
-                hashes.pop();
+            if (hashes[i].isReady) {
+                outputFile.write((char*)hashes[i].hash.data(), CSHA256::OUTPUT_SIZE);
                 hashes_mutex.unlock();
 
-                outputFile.seekp(hi.number * CSHA256::OUTPUT_SIZE);
-                outputFile.write((char*)hi.hash.data(), CSHA256::OUTPUT_SIZE);
                 log_mutex.lock();
-                std::cout << "Writing block " << hi.number << " out of " << blocksCount << " Progress: " << (blocksCount - blocksLeft) / blocksCount * 100 << " %" << std::endl;
+                std::cout << "Writing block " << i + 1 << " out of " << blocksCount << " Progress: " << ((double)i + 1) / blocksCount * 100 << " %" << std::endl;
                 log_mutex.unlock();
-                blocksLeft--;
-                if (hi.number == blocksCount - 1) {
-                    processingFinished = true;
-                }
-                currentBlock++;
             }
             else {
                 hashes_mutex.unlock();
+                i--;
             }
-        } while (!processingFinished);
+        }
         makeCalculation = false;
     }
 
