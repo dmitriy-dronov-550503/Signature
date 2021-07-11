@@ -54,6 +54,9 @@
     <ClCompile Include="sha256\sha512.cpp">
       <Filter>Исходные файлы\sha256</Filter>
     </ClCompile>
+    <ClCompile Include="SignatureGenerator.cpp">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="md5.h">
@@ -79,6 +82,9 @@
     </ClInclude>
     <ClInclude Include="sha256\sha512.h">
       <Filter>Файлы заголовков\sha256</Filter>
+    </ClInclude>
+    <ClInclude Include="SignatureGenerator.h">
+      <Filter>Файлы заголовков</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

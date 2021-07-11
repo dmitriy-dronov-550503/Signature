@@ -1,6 +1,8 @@
 ﻿#include <Windows.h>
 #include <boost/lambda/lambda.hpp>
 #include <boost/program_options.hpp>
+#include <boost/thread/thread.hpp>
+#include <boost/interprocess/sync/named_semaphore.hpp>
 #include <iostream>
 #include <iterator>
 #include <algorithm>
@@ -12,9 +14,7 @@
 #include <queue>
 #include <mutex>
 #include <thread>
-#include <sstream>
 
-#include "md5.h"
 #include <sha256.h>
 
 
@@ -22,6 +22,7 @@ namespace po = boost::program_options;
 
 #define KB 1024ULL
 #define MB (KB * KB)
+#define MAX_CORES 12
 
 
 struct BlockItem
@@ -51,7 +52,7 @@ public:
     }
 };
 
-class SignatureGenerator
+class SignatureGenerator2
 {
 private:
     std::ifstream inputFile;
@@ -64,16 +65,23 @@ private:
     std::mutex blocks_mutex;
     std::mutex hashes_mutex;
 
+    boost::mutex m_mutex;
+    boost::condition_variable cv;
+
     bool makeCalculation = true;
 
     std::mutex log_mutex;
 
+    const char* const semaphoreName = "hash_thrds_sync";
+    unsigned int maxNumberOfCores;
+    static const unsigned int defaultNumOfCores = 8;
+
 public:
     double blocksCount;
 
-    SignatureGenerator() = delete;
+    SignatureGenerator2() = delete;
 
-    SignatureGenerator(std::string inputFilePath, std::string outputFilePath, size_t bSize) : blockSize(bSize) {
+    SignatureGenerator2(std::string inputFilePath, std::string outputFilePath, size_t bSize) : blockSize(bSize) {
         inputFile.open(inputFilePath, std::ios::binary);
         outputFile.open(outputFilePath, std::ios::out | std::ios::trunc | std::ios::binary);
         inputFileSize = std::filesystem::file_size(inputFilePath);
@@ -84,18 +92,27 @@ public:
         if (si.available < outputFileSize) {
             throw std::exception("Not enough disk space for creating signature file");
         }
+
+        const unsigned int cores = std::thread::hardware_concurrency();
+        maxNumberOfCores = (cores == 0) ? defaultNumOfCores : cores;
+
+        boost::interprocess::named_semaphore::remove(semaphoreName);
+        boost::interprocess::named_semaphore semaphore(boost::interprocess::create_only_t(), semaphoreName, maxNumberOfCores * 4);
     }
 
     void run() {
-        std::thread rft(&SignatureGenerator::readFileThread, this);
+        std::thread rft(&SignatureGenerator2::readFileThread, this);
+        //SetThreadAffinityMask(rft.native_handle(), 1 << maxNumberOfCores-1);
 
         std::vector<std::thread> threads;
-        for (int i = 0; i < 12; i++)
+        for (int i = 0; i < maxNumberOfCores - 1; i++) // reserve at least 2 threads for read/write to files
         {
-            threads.push_back(std::thread(&SignatureGenerator::calculateHashThread, this));
+            threads.push_back(std::thread(&SignatureGenerator2::calculateHashThread, this));
+            //SetThreadAffinityMask(threads[i].native_handle(), 1 << i);
         }
         
-        std::thread wft(&SignatureGenerator::writeFileThread, this);
+        std::thread wft(&SignatureGenerator2::writeFileThread, this);
+        //SetThreadAffinityMask(wft.native_handle(), 1 << maxNumberOfCores);
         
         for (auto& t : threads) t.join();
 
@@ -106,6 +123,7 @@ public:
 
     // This thread is able to read block from the file and put them into queue
     void readFileThread() {
+        boost::interprocess::named_semaphore semaphore(boost::interprocess::open_only_t(), semaphoreName);
         try {
             for (int i = 0; i < blocksCount; ++i) {
                 std::vector<unsigned char> buf(blockSize);
@@ -116,6 +134,7 @@ public:
                 log_mutex.lock();
                 std::cout << "Reading block " << i << " out of " << blocksCount << std::endl;
                 log_mutex.unlock();
+                semaphore.wait();
             }
         }
         catch (std::exception& e) {
@@ -123,8 +142,17 @@ public:
         }
     }
 
+    DWORD GetCurrentProcessorNumberXP(void)
+    {
+        _asm {mov eax, 1}
+        _asm {cpuid}
+        _asm {shr ebx, 24}
+        _asm {mov eax, ebx}
+    }
+
     // This thread calculates hash for the block
     void calculateHashThread() {
+        boost::interprocess::named_semaphore semaphore(boost::interprocess::open_only_t(), semaphoreName);
         while (makeCalculation) {
             blocks_mutex.lock();
             if (!blocks.empty()) {
@@ -137,6 +165,7 @@ public:
 
                 log_mutex.lock();
                 std::cout << "Calculate hash for block " << number << std::endl;
+                std::cout << "Thread #" << std::this_thread::get_id() << ": on CPU " << GetCurrentProcessorNumberXP() << "\n";
                 log_mutex.unlock();
 
                 // Calculate SHA256 hash
@@ -152,6 +181,13 @@ public:
                 hashes_mutex.lock();
                 hashes.push(HashItem(number, hash));
                 hashes_mutex.unlock();
+
+                semaphore.post();
+
+                {
+                    boost::mutex::scoped_lock lock(m_mutex);
+                    cv.notify_all();
+                }
             }
             else
             {
@@ -163,26 +199,34 @@ public:
     // This thread pops hashes and writes them to the output file
     void writeFileThread() {
         bool processingFinished = false;
-        double blocksLeft = blocksCount-1;
+        uintmax_t currentBlock = 0;
+        double blocksLeft = blocksCount - 1;
         do {
             hashes_mutex.lock();
             if (!hashes.empty()) {
                 HashItem hi = hashes.top();
+
+                if (currentBlock != hi.number) {
+                    std::cout << "====== GOT WRONG SEQUENCE ======" << std::endl;
+                    hashes_mutex.unlock();
+                    boost::mutex::scoped_lock lock(m_mutex);
+                    cv.wait(lock);
+                    continue;
+                }
+
                 hashes.pop();
                 hashes_mutex.unlock();
 
-                uintmax_t number = hi.number;
-                std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash = hi.hash;
-
-                outputFile.seekp(number * CSHA256::OUTPUT_SIZE);
-                outputFile.write((char*)hash.data(), CSHA256::OUTPUT_SIZE);
+                outputFile.seekp(hi.number * CSHA256::OUTPUT_SIZE);
+                outputFile.write((char*)hi.hash.data(), CSHA256::OUTPUT_SIZE);
                 log_mutex.lock();
-                std::cout << "Writing block " << number << " out of " << blocksCount << " Progress: " << (blocksCount - blocksLeft) / blocksCount * 100 << " %" << std::endl;
+                std::cout << "Writing block " << hi.number << " out of " << blocksCount << " Progress: " << (blocksCount - blocksLeft) / blocksCount * 100 << " %" << std::endl;
                 log_mutex.unlock();
                 blocksLeft--;
-                if (number == blocksCount - 1) {
+                if (hi.number == blocksCount - 1) {
                     processingFinished = true;
                 }
+                currentBlock++;
             }
             else {
                 hashes_mutex.unlock();
@@ -191,9 +235,10 @@ public:
         makeCalculation = false;
     }
 
-    ~SignatureGenerator() {
+    ~SignatureGenerator2() {
         outputFile.close();
         inputFile.close();
+        boost::interprocess::named_semaphore::remove(semaphoreName);
     }
 };
 
@@ -246,7 +291,7 @@ int main(int argc, char** argv)
             blockSize = 1 * MB;
         }
 
-        SignatureGenerator sg(inputFilePath, outputFilePath, blockSize);
+        SignatureGenerator2 sg(inputFilePath, outputFilePath, blockSize);
 
         sg.run();
 

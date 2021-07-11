@@ -214,6 +214,7 @@
     <ClCompile Include="sha256\sha256_sse41.cpp" />
     <ClCompile Include="sha256\sha512.cpp" />
     <ClCompile Include="Signature.cpp" />
+    <ClCompile Include="SignatureGenerator.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="md5.h" />
@@ -224,6 +225,7 @@
     <ClInclude Include="sha256\hmac_sha512.h" />
     <ClInclude Include="sha256\sha256.h" />
     <ClInclude Include="sha256\sha512.h" />
+    <ClInclude Include="SignatureGenerator.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
