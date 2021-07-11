@@ -65,9 +65,7 @@ struct BlockItem
 
 struct HashItem
 {
-    boost::mutex mx;
-    boost::condition_variable cv;
-    bool ready = false;
+    std::atomic<bool> ready = false;
     std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
 
     HashItem() {}
@@ -153,7 +151,7 @@ public:
     void readFileThread() {
         boost::interprocess::named_semaphore semaphore(boost::interprocess::open_only_t(), semaphoreName);
         try {
-            for (int i = 0; i < blocksCount; i++) {
+            for (int i = 0; i < blocksCount; ++i) {
                 auto block = blockPool.allocate();
                 if (block)
                 {
@@ -206,13 +204,8 @@ public:
                 hasher.Write(bi->block.data(), blockSize);
                 hasher.Finalize(hash.hash.data());
 
-                {
-                    boost::lock_guard<boost::mutex> lk(hash.mx);
-                    hash.ready = true;
-                    hash.cv.notify_all();
-                }
-
-                memset(bi->block.data(), 0, bi->block.size());
+                hash.ready = true;
+                memset(bi->block.data(), 0, bi->block.size()); // TODO: improve
                 blockPool.release(bi);
                 semaphore.post();
             }
@@ -224,17 +217,18 @@ public:
 
     // This thread pops hashes and writes them to the output file
     void writeFileThread() {
-        for (int i = 0; i < blocksCount; i++) {
-            boost::unique_lock<boost::mutex> lk(hashes[i].mx);
-            while (!hashes[i].ready) {
-                hashes[i].cv.wait(lk);
+        for (int i = 0; i < blocksCount; ++i) {
+            if (hashes[i].ready) {
+                outputFile.write((char*)hashes[i].hash.data(), CSHA256::OUTPUT_SIZE);
+
+                log_mutex.lock();
+                std::cout << "Writing block " << i + 1 << " out of " << blocksCount << " Progress: " << ((double)i + 1) / blocksCount * 100 << " %" << std::endl;
+                log_mutex.unlock();
             }
-
-            outputFile.write((char*)hashes[i].hash.data(), CSHA256::OUTPUT_SIZE);
-
-            log_mutex.lock();
-            std::cout << "Writing block " << i + 1 << " out of " << blocksCount << " Progress: " << ((double)i + 1) / blocksCount * 100 << " %" << std::endl;
-            log_mutex.unlock();
+            else {
+                i--;
+                std::this_thread::yield();
+            }
         }
         makeCalculation = false;
     }
