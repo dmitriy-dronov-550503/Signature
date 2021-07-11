@@ -65,8 +65,13 @@ struct BlockItem
 
 struct HashItem
 {
-    bool isReady = false;
+    boost::mutex mx;
+    boost::condition_variable cv;
+    bool ready = false;
     std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
+
+    HashItem() {}
+    HashItem(const HashItem& item) {}
 };
 
 class SignatureGenerator2
@@ -82,9 +87,6 @@ private:
     std::vector<HashItem> hashes;
     std::mutex blocks_mutex;
     std::mutex hashes_mutex;
-
-    boost::mutex m_mutex;
-    boost::condition_variable cv;
 
     bool makeCalculation = true;
 
@@ -190,20 +192,25 @@ public:
                 blocks.pop();
                 blocks_mutex.unlock();
 
+                auto number = bi->number;
+
                 log_mutex.lock();
-                std::cout << "Calculate hash for block " << bi->number << std::endl;
+                std::cout << "Calculate hash for block " << number << std::endl;
                 log_mutex.unlock();
+
+                auto& hash = hashes[number];
 
                 // Calculate SHA256 hash
                 CSHA256 hasher;
                 hasher.Reset();
                 hasher.Write(bi->block.data(), blockSize);
-
-                hashes_mutex.lock();
-                auto& hash = hashes[bi->number];
                 hasher.Finalize(hash.hash.data());
-                hashes[bi->number].isReady = true;
-                hashes_mutex.unlock();
+
+                {
+                    boost::lock_guard<boost::mutex> lk(hash.mx);
+                    hash.ready = true;
+                    hash.cv.notify_all();
+                }
 
                 memset(bi->block.data(), 0, bi->block.size());
                 blockPool.release(bi);
@@ -218,19 +225,16 @@ public:
     // This thread pops hashes and writes them to the output file
     void writeFileThread() {
         for (int i = 0; i < blocksCount; i++) {
-            hashes_mutex.lock();
-            if (hashes[i].isReady) {
-                outputFile.write((char*)hashes[i].hash.data(), CSHA256::OUTPUT_SIZE);
-                hashes_mutex.unlock();
+            boost::unique_lock<boost::mutex> lk(hashes[i].mx);
+            while (!hashes[i].ready) {
+                hashes[i].cv.wait(lk);
+            }
 
-                log_mutex.lock();
-                std::cout << "Writing block " << i + 1 << " out of " << blocksCount << " Progress: " << ((double)i + 1) / blocksCount * 100 << " %" << std::endl;
-                log_mutex.unlock();
-            }
-            else {
-                hashes_mutex.unlock();
-                i--;
-            }
+            outputFile.write((char*)hashes[i].hash.data(), CSHA256::OUTPUT_SIZE);
+
+            log_mutex.lock();
+            std::cout << "Writing block " << i + 1 << " out of " << blocksCount << " Progress: " << ((double)i + 1) / blocksCount * 100 << " %" << std::endl;
+            log_mutex.unlock();
         }
         makeCalculation = false;
     }
