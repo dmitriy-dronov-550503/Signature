@@ -1,6 +1,8 @@
 #include "SignatureGenerator.h"
 #include <filesystem>
 
+#define DEBUG_LOG 0
+
 SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const std::string outputFilePath, const unsigned int blockSize) :
     blockSize(blockSize)
 {
@@ -14,14 +16,18 @@ SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const st
     const unsigned int cores = std::thread::hardware_concurrency();
     numOfCores = (cores == 0) ? DEFAULT_NUM_OF_CORES : cores;
 
-    blocksPool.init("SignGen_semaphore", numOfCores * Q_RESERVATION_MULT);
+    blocksPool.init("SignGen_blocks_semaphore", numOfCores * Q_RESERVATION_MULT);
+    hashesPool.init("SignGen_hashes_semaphore", numOfCores * Q_RESERVATION_MULT);
 
-    for (int i = 0; i < numOfCores * Q_RESERVATION_MULT; ++i) {
+    for (uint32_t i = 0; i < numOfCores * Q_RESERVATION_MULT; ++i) {
         auto block = std::make_shared<Block>(i, blockSize);
         blocksPool.release(block); // Add block to the pool
     }
 
-    hashQ.resize(blocksCount);
+    for (uint32_t i = 0; i < numOfCores * Q_RESERVATION_MULT; i++) {
+        auto hash = std::make_shared<Hash>();
+        hashesPool.release(hash); // Add hash to the pool
+    }
 
     const uint64_t outputFileSize = blocksCount * CSHA256::OUTPUT_SIZE;
     const auto si = std::filesystem::space(outputFilePath);
@@ -39,6 +45,11 @@ SignatureGenerator::~SignatureGenerator()
 void SignatureGenerator::ReadFileThread()
 {
     for (int i = 0; i < blocksCount; ++i) {
+#if DEBUG_LOG
+        std::stringstream ss;
+        ss << "Reading block " << i << " out of " << blocksCount << std::endl;
+        std::cout << ss.str();
+#endif
         auto block = blocksPool.allocate();
 
         block->number = i;
@@ -57,24 +68,36 @@ void SignatureGenerator::ReadFileThread()
 
 void SignatureGenerator::WriteFileThread()
 {
-    for (int i = 0; i < blocksCount; ++i) {
-        if (hashQ[i].ready) {
-            outputFile.write((char*)hashQ[i].hash.data(), HASH_SIZE);
-            ShowProgress(static_cast<float>(i) / (static_cast<float>(blocksCount) - 1));
+    uint64_t blocksLeft = blocksCount;
+    while (!processingCompleted) {
+        std::shared_ptr<Hash> hash;
+        {
+            std::lock_guard<std::mutex> lock(hashQSync);
+            if (!hashQ.empty()) {
+                hash = hashQ.front();
+                hashQ.pop();
+            }
+            else {
+                hash.reset();
+            }
         }
-        else {
-            i--;
-            std::this_thread::yield();
+
+        if (hash) {
+            outputFile.seekp(hash->number * HASH_SIZE);
+            outputFile.write((char*)hash->hash.data(), HASH_SIZE);
+            ShowProgress(static_cast<float>(blocksCount - blocksLeft) / (static_cast<float>(blocksCount) - 1));
+            hashesPool.release(hash);
+            blocksLeft--;
+            processingCompleted = (blocksLeft == 0) ? true : false;
         }
     }
-    writeCompleted = true;
 }
 
 void SignatureGenerator::HashingThread()
 {
     std::shared_ptr<Block> block;
 
-    while (!writeCompleted) {
+    while (!processingCompleted) {
         
         {
             std::lock_guard<std::mutex> lock(blockQSync);
@@ -89,14 +112,25 @@ void SignatureGenerator::HashingThread()
 
         if (block) {
             auto num = block->number;
-            auto& hash = hashQ[num];
+            auto hash = hashesPool.allocate();
+            hash->number = num;
+
+#if DEBUG_LOG
+            std::stringstream ss;
+            ss << "Calculate hash of " << num << " block" << std::endl;
+            std::cout << ss.str();
+#endif
 
             Hasher hasher;
             hasher.Reset();
             hasher.Write(block->block.data(), blockSize);
-            hasher.Finalize(hash.hash.data());
+            hasher.Finalize(hash->hash.data());
 
-            hash.ready = true;
+            {
+                std::lock_guard<std::mutex> lock(hashQSync);
+                hashQ.push(hash);
+            }
+
             blocksPool.release(block);
         }
     }

@@ -64,7 +64,7 @@ int main(int argc, char** argv)
             }
         }
         else {
-            throw std::exception("Input file is required")
+            throw std::exception("Input file is required");
         }
 
         if (args.count("output")) {
@@ -79,6 +79,8 @@ int main(int argc, char** argv)
         {
             blockSize = 1 * MB;
         }
+
+        std::cout << "Generating signature " << outputFilePath << " from " << inputFilePath << std::endl;
 
         SignatureGenerator sg(inputFilePath, outputFilePath, blockSize);
         sg.Generate();
