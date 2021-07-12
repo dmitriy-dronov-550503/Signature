@@ -1,6 +1,41 @@
 #include "SignatureGenerator.h"
 #include <filesystem>
 
+SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const std::string outputFilePath, const unsigned int blockSize) :
+    blockSize(blockSize)
+{
+    inputFile.open(inputFilePath, std::ios::in | std::ios::binary);
+    if (!inputFile) throw std::exception("Cannot find input file");
+    outputFile.open(outputFilePath, std::ios::out | std::ios::trunc | std::ios::binary);
+    if (!outputFile) throw std::exception("Cannot create output file");
+
+    inputFileSize = std::filesystem::file_size(inputFilePath);
+    blocksCount = static_cast<uint64_t>(ceil((double)inputFileSize / (double)blockSize));
+    const unsigned int cores = std::thread::hardware_concurrency();
+    numOfCores = (cores == 0) ? DEFAULT_NUM_OF_CORES : cores;
+
+    blocksPool.init("SignGen_semaphore", numOfCores * Q_RESERVATION_MULT);
+
+    for (int i = 0; i < numOfCores * Q_RESERVATION_MULT; ++i) {
+        auto block = std::make_shared<Block>(i, blockSize);
+        blocksPool.release(block); // Add block to the pool
+    }
+
+    hashQ.resize(blocksCount);
+
+    const uint64_t outputFileSize = blocksCount * CSHA256::OUTPUT_SIZE;
+    const auto si = std::filesystem::space(outputFilePath);
+    if (si.available < outputFileSize) {
+        throw std::exception("Not enough disk space for creating signature file");
+    }
+}
+
+SignatureGenerator::~SignatureGenerator()
+{
+    outputFile.close();
+    inputFile.close();
+}
+
 void SignatureGenerator::ReadFileThread()
 {
     for (int i = 0; i < blocksCount; ++i) {
@@ -25,7 +60,7 @@ void SignatureGenerator::WriteFileThread()
     for (int i = 0; i < blocksCount; ++i) {
         if (hashQ[i].ready) {
             outputFile.write((char*)hashQ[i].hash.data(), HASH_SIZE);
-            ShowProgress(i / (blocksCount - 1));
+            ShowProgress(static_cast<float>(i) / (static_cast<float>(blocksCount) - 1));
         }
         else {
             i--;
@@ -81,41 +116,6 @@ void SignatureGenerator::ShowProgress(float progress)
     ss << "] " << int(progress * 100.0) << " %\r";
     std::cout << ss.str();
     std::cout.flush();
-}
-
-SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const std::string outputFilePath, const unsigned int blockSize) :
-    blockSize(blockSize) 
-{
-    inputFile.open(inputFilePath, std::ios::in | std::ios::binary);
-    if (!inputFile) throw std::exception("Cannot find input file");
-    outputFile.open(outputFilePath, std::ios::out | std::ios::trunc | std::ios::binary);
-    if (!outputFile) throw std::exception("Cannot create output file");
-
-    inputFileSize = std::filesystem::file_size(inputFilePath);
-    const uint64_t outputFileSize = blocksCount * CSHA256::OUTPUT_SIZE;
-    blocksCount = static_cast<uint64_t>(ceil((double)inputFileSize / (double)blockSize));
-    const unsigned int cores = std::thread::hardware_concurrency();
-    numOfCores = (cores == 0) ? DEFAULT_NUM_OF_CORES : cores;
-    
-    blocksPool.init("SignGen_semaphore", numOfCores * Q_RESERVATION_MULT);
-
-    for (int i = 0; i < numOfCores * Q_RESERVATION_MULT; ++i) {
-        auto block = std::make_shared<Block>(i, blockSize);
-        blocksPool.release(block); // Add block to the pool
-    }
-
-    hashQ.resize(blocksCount);
-
-    const auto si = std::filesystem::space(outputFilePath);
-    if (si.available < outputFileSize) {
-        throw std::exception("Not enough disk space for creating signature file");
-    }
-}
-
-SignatureGenerator::~SignatureGenerator()
-{
-    outputFile.close();
-    inputFile.close();
 }
 
 void SignatureGenerator::Generate()

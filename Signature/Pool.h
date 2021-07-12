@@ -72,18 +72,18 @@ public:
                 item = items.front();
                 items.pop();
             }
+            itemsCount--;
         }
-        itemsCount--;
         return item;
     }
 
     void release(std::shared_ptr<T> item) {
         assert(isInit);
-        itemsCount++;
-        if (itemsCount > maxItems) throw std::exception("Pool overwhelmed with number of items that can be controlled by semaphore");
         boost::interprocess::named_semaphore semaphore(boost::interprocess::open_only_t(), sName.c_str());
         {
             std::lock_guard<std::mutex> lock(poolMutex);
+            itemsCount++;
+            if (itemsCount > maxItems) throw std::exception("Pool overwhelmed with number of items that can be controlled by semaphore");
             items.push(item);
         }
         semaphore.post();
