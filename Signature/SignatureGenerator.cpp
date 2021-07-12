@@ -68,14 +68,17 @@ void SignatureGenerator::ReadFileThread()
 
 void SignatureGenerator::WriteFileThread()
 {
-    uint64_t blocksLeft = blocksCount;
+    uint64_t currentBlock = 0;
     while (!processingCompleted) {
         std::shared_ptr<Hash> hash;
         {
             std::lock_guard<std::mutex> lock(hashQSync);
             if (!hashQ.empty()) {
-                hash = hashQ.front();
-                hashQ.pop();
+                hash = hashQ.top();
+                if (hash->number == currentBlock)
+                    hashQ.pop();
+                else
+                    hash.reset();
             }
             else {
                 hash.reset();
@@ -83,12 +86,11 @@ void SignatureGenerator::WriteFileThread()
         }
 
         if (hash) {
-            outputFile.seekp(hash->number * HASH_SIZE);
             outputFile.write((char*)hash->hash.data(), HASH_SIZE);
-            ShowProgress(static_cast<float>(blocksCount - blocksLeft) / (static_cast<float>(blocksCount) - 1));
+            ShowProgress(static_cast<float>(currentBlock) / (static_cast<float>(blocksCount) - 1));
             hashesPool.release(hash);
-            blocksLeft--;
-            processingCompleted = (blocksLeft == 0) ? true : false;
+            processingCompleted = (currentBlock == (blocksCount - 1)) ? true : false;
+            currentBlock++;
         }
     }
 }

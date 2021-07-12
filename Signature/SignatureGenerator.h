@@ -28,6 +28,15 @@ struct Hash
     Hash(const Hash& item) {}
 };
 
+class HashCompare
+{
+public:
+    bool operator() (const std::shared_ptr<Hash> left, const std::shared_ptr<Hash> right)
+    {
+        return left->number > right->number;
+    }
+};
+
 class SignatureGenerator
 {
 private:
@@ -47,7 +56,7 @@ private:
     SyncPool<Block> blocksPool;
     SyncPool<Hash> hashesPool;
     std::queue<std::shared_ptr<Block>> blockQ;
-    std::queue<std::shared_ptr<Hash>> hashQ;
+    std::priority_queue<std::shared_ptr<Hash>, std::vector<std::shared_ptr<Hash>>, HashCompare> hashQ;
     std::mutex blockQSync;
     std::mutex hashQSync;
     std::atomic<bool> processingCompleted = false;
