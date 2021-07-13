@@ -1,32 +1,33 @@
+#include "Windows.h"
 #include "SignatureGenerator.h"
-#include <filesystem>
+#include <boost/filesystem.hpp>
 
-SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const std::string outputFilePath, const unsigned int blockSize) :
+SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const std::string outputFilePath, const uint64_t blockSize) :
     blockSize(blockSize)
 {
     inputFile.open(inputFilePath, std::ios::in | std::ios::binary);
-    if (!inputFile) throw std::exception("Cannot find input file");
+    if (!inputFile) throw SignatureGeneratorException("Cannot open input file", ERROR_FILE_NOT_FOUND);
     outputFile.open(outputFilePath, std::ios::out | std::ios::trunc | std::ios::binary);
-    if (!outputFile) throw std::exception("Cannot create output file");
+    if (!outputFile) throw SignatureGeneratorException("Cannot create output file. Is path to the file exist?", ERROR_PATH_NOT_FOUND);
 
-    inputFileSize = std::filesystem::file_size(inputFilePath);
+    inputFileSize = boost::filesystem::file_size(inputFilePath);
     blocksCount = static_cast<uint64_t>(ceil((double)inputFileSize / (double)blockSize));
     const unsigned int cores = std::thread::hardware_concurrency();
     numOfCores = (cores == 0) ? DEFAULT_NUM_OF_CORES : cores;
 
-    blocksPool.init("SignGen_semaphore", numOfCores * Q_RESERVATION_MULT);
+    blocksPool.Init("SignGen_semaphore", numOfCores * Q_RESERVATION_MULT);
 
-    for (int i = 0; i < numOfCores * Q_RESERVATION_MULT; ++i) {
+    for (uint32_t i = 0; i < blocksPool.GetMaxItems(); ++i) {
         auto block = std::make_shared<Block>(i, blockSize);
-        blocksPool.release(block); // Add block to the pool
+        blocksPool.Release(block); // Add block to the pool
     }
 
-    hashQ.resize(blocksCount);
+    hashQ.resize(static_cast<size_t>(blocksCount));
 
-    const uint64_t outputFileSize = blocksCount * CSHA256::OUTPUT_SIZE;
-    const auto si = std::filesystem::space(outputFilePath);
-    if (si.available < outputFileSize) {
-        throw std::exception("Not enough disk space for creating signature file");
+    const uint64_t outputFileSize = blocksCount * HASH_SIZE;
+    const auto free = boost::filesystem::space(outputFilePath).free;
+    if (free < outputFileSize) {
+        throw SignatureGeneratorException("Not enough disk space for creating output signature file", ERROR_OUTOFMEMORY);
     }
 }
 
@@ -39,7 +40,7 @@ SignatureGenerator::~SignatureGenerator()
 void SignatureGenerator::ReadFileThread()
 {
     for (int i = 0; i < blocksCount; ++i) {
-        auto block = blocksPool.allocate();
+        auto block = blocksPool.Allocate();
 
         block->number = i;
         auto bytesLeft = inputFileSize - inputFile.tellg();
@@ -47,11 +48,8 @@ void SignatureGenerator::ReadFileThread()
             memset(block->block.data(), 0, block->block.size());
         }
         inputFile.read(reinterpret_cast<char*>(block->block.data()), blockSize);
-
-        {
-            std::lock_guard<std::mutex> lock(blockQSync);
-            blockQ.push(block);
-        }
+        std::lock_guard<std::mutex> lock(blockQSync);
+        blockQ.push(block);
     }
 }
 
@@ -89,15 +87,15 @@ void SignatureGenerator::HashingThread()
 
         if (block) {
             auto num = block->number;
-            auto& hash = hashQ[num];
+            auto& hash = hashQ[static_cast<const unsigned int>(num)];
 
             Hasher hasher;
             hasher.Reset();
-            hasher.Write(block->block.data(), blockSize);
+            hasher.Write(block->block.data(), static_cast<size_t>(blockSize));
             hasher.Finalize(hash.hash.data());
 
             hash.ready = true;
-            blocksPool.release(block);
+            blocksPool.Release(block);
         }
     }
 }
@@ -107,7 +105,7 @@ void SignatureGenerator::ShowProgress(float progress)
     static const unsigned int BAR_WIDTH = 70UL;
     std::stringstream ss;
     ss << "[";
-    int pos = BAR_WIDTH * progress;
+    int pos = static_cast<int>(BAR_WIDTH * progress);
     for (int i = 0; i < BAR_WIDTH; ++i) {
         if (i < pos) ss << "=";
         else if (i == pos) ss << ">";

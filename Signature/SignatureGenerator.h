@@ -10,10 +10,10 @@
 
 struct Block
 {
-    unsigned int number;
+    uint64_t number;
     std::vector<unsigned char> block;
 
-    Block(unsigned int num, unsigned int blockSize)
+    Block(uint64_t num, size_t blockSize)
         : number(num) {
         block.resize(blockSize);
     }
@@ -24,8 +24,25 @@ struct Hash
     std::atomic<bool> ready = false;
     std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
 
-    Hash() {}
-    Hash(const Hash& item) {}
+    Hash() : hash{ 0 } {}
+    Hash(const Hash& item) : hash{ 0 } {}
+};
+
+class SignatureGeneratorException {
+private:
+    std::string message;
+    int error;
+public:
+    SignatureGeneratorException(const char* msg, int err)
+        : message(msg), error(err) {}
+
+    const char* What() {
+        return message.c_str();
+    }
+    
+    const int ErrorCode() {
+        return error;
+    }
 };
 
 class SignatureGenerator
@@ -38,7 +55,7 @@ private:
 
     std::ifstream inputFile;
     std::ofstream outputFile;
-    const unsigned int blockSize;
+    const uint64_t blockSize;
 
     uint64_t inputFileSize;
     uint64_t blocksCount;
@@ -58,7 +75,7 @@ private:
     inline void ShowProgress(float progress);
 
 public:
-    SignatureGenerator(const std::string inputFilePath, const std::string outputFilePath, const unsigned int blockSize);
+    SignatureGenerator(const std::string inputFilePath, const std::string outputFilePath, const uint64_t blockSize);
     ~SignatureGenerator();
     void Generate();
 };
