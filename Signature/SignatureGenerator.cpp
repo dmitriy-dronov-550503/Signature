@@ -100,7 +100,6 @@ void SignatureGenerator::HashingThread()
             hasher.Write(block->block.data(), static_cast<size_t>(blockSize));
             hasher.Finalize(hash.hash.data());
 
-            hash.ready = true;
             blocksPool.Release(block);
 
             {
@@ -118,7 +117,7 @@ void SignatureGenerator::ShowProgress(float progress)
     std::stringstream ss;
     ss << "[";
     int pos = static_cast<int>(BAR_WIDTH * progress);
-    for (int i = 0; i < BAR_WIDTH; ++i) {
+    for (uint32_t i = 0; i < BAR_WIDTH; ++i) {
         if (i < pos) ss << "=";
         else if (i == pos) ss << ">";
         else ss << " ";
