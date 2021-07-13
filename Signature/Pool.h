@@ -3,6 +3,10 @@
 #include <mutex>
 #include <boost/interprocess/sync/named_semaphore.hpp>
 
+// Pool class allows to create a pool of objects that can be allocated
+// and released when needed. It is thread safe. It does not have
+// objects quantity limitation. Objects must be created with 
+// std::make_shared and added to the pool via Release method.
 template<typename T>
 class Pool
 {
@@ -29,6 +33,11 @@ public:
     }
 };
 
+// SyncPool class allows to create a pool of objects that can be allocated
+// and released when needed. Allocate operation is blocking and waits until
+// an object is available. It is thread safe. Quantity of objects must
+// be defined. Objects must be created with std::make_shared and added to
+// the pool via Release method.
 template<typename T>
 class SyncPool
 {

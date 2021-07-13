@@ -22,7 +22,7 @@ SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const st
         blocksPool.Release(block); // Add block to the pool
     }
 
-    hashQ.resize(static_cast<size_t>(blocksCount));
+    hashes.resize(static_cast<size_t>(blocksCount));
 
     const uint64_t outputFileSize = blocksCount * HASH_SIZE;
     const auto free = boost::filesystem::space(outputFilePath).free;
@@ -56,8 +56,8 @@ void SignatureGenerator::ReadFileThread()
 void SignatureGenerator::WriteFileThread()
 {
     for (int i = 0; i < blocksCount; ++i) {
-        if (hashQ[i].ready) {
-            outputFile.write((char*)hashQ[i].hash.data(), HASH_SIZE);
+        if (hashes[i].ready) {
+            outputFile.write((char*)hashes[i].hash.data(), HASH_SIZE);
             ShowProgress(static_cast<float>(i) / (static_cast<float>(blocksCount) - 1));
         }
         else {
@@ -87,7 +87,7 @@ void SignatureGenerator::HashingThread()
 
         if (block) {
             auto num = block->number;
-            auto& hash = hashQ[static_cast<const unsigned int>(num)];
+            auto& hash = hashes[static_cast<const unsigned int>(num)];
 
             Hasher hasher;
             hasher.Reset();
@@ -122,7 +122,8 @@ void SignatureGenerator::Generate()
     std::thread fileWriter(&SignatureGenerator::WriteFileThread, this);
 
     std::vector<std::thread> hashProcessors;
-    for (uint32_t i = 0; i < numOfCores; ++i)
+    uint32_t hashCores = (numOfCores >= 3) ? numOfCores - 2 : 1;
+    for (uint32_t i = 0; i < hashCores; ++i) // Reserve 2 cores for reader and writer
     {
         hashProcessors.push_back(std::move(std::thread(&SignatureGenerator::HashingThread, this)));
     }
