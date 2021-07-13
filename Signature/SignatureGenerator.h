@@ -5,8 +5,11 @@
 #include <array>
 #include <queue>
 #include <sha256.h>
-#include <cstdint>
 #include "Pool.h"
+
+#define KB 1024ULL
+#define MB (KB * 1024ULL)
+#define GB (MB * 1024ULL)
 
 // Block structure allows tracking read block number
 struct Block
@@ -53,6 +56,7 @@ class SignatureGenerator
 private:
     static const uint32_t DEFAULT_NUM_OF_CORES = 4UL;
     static const uint32_t Q_RESERVATION_MULT = 4UL;     // Multiplier for processing units reservation
+    static const uint64_t BLOCKS_POOL_MEM_LIMIT = 1.5 * GB;
     static const uint32_t HASH_SIZE = CSHA256::OUTPUT_SIZE;
     typedef CSHA256 Hasher;
 

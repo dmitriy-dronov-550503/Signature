@@ -1,26 +1,23 @@
 ﻿#include <Windows.h>
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/exception/diagnostic_information.hpp>
 #include "SignatureGenerator.h"
 
 namespace po = boost::program_options;
-
-#define KB 1024ULL
-#define MB (KB * KB)
 
 int main(int argc, char** argv)
 {
     int errorCode = ERROR_SUCCESS;
 
     try {
-        po::options_description desc("This program calculates signature of the file. It divides inputFile into blocks with fixed size, \
-calculates hashes for each block and writes them to the outputFile. By default block size is 1 MB");
+        po::options_description desc("This program calculates signature of the file. It divides input file into blocks of a fixed size, \
+calculates hashes for each block and writes hashes to output file. By default block size is 1 MB");
         desc.add_options()
             ("help", "shows this message")
             ("input,if", po::value<std::string>(), "Input file")
             ("output,of", po::value<std::string>(), "Output file")
-            ("block,bs", po::value<uint32_t>(), "Block size in KB");
-
+            ("block,bs", po::value<int>(), "Block size in KB");
 
         po::variables_map args;
         po::store(po::parse_command_line(argc, argv, desc), args);
@@ -29,10 +26,10 @@ calculates hashes for each block and writes them to the outputFile. By default b
         // Initialize input variables
         std::string inputFilePath = "";
         std::string outputFilePath = "";
-        size_t blockSize = 0;
+        uint64_t blockSize = 0;
 
         do {
-            if (args.count("help")) {
+            if (args.count("help") || args.empty()) {
                 std::cout << desc << std::endl;
                 break;
             }
@@ -59,11 +56,18 @@ calculates hashes for each block and writes them to the outputFile. By default b
             }
 
             if (args.count("block")) {
-                blockSize = args["block"].as<size_t>() * KB; // Read and convert block size from kilobytes to bytes
+                int bsArg = args["block"].as<int>();
+                
+                if (bsArg <= 0) {
+                    std::cerr << "Block size must be greater than zero" << std::endl;
+                    break;
+                }
+
+                blockSize = bsArg * KB; // Convert from kylobytes to bytes
             }
             else
             {
-                std::cout << "Block size is set to default 1 MB size" << std::endl;
+                std::cout << "Block size is set to default 1 MB" << std::endl;
                 blockSize = 1 * MB;
             }
 
@@ -72,26 +76,35 @@ calculates hashes for each block and writes them to the outputFile. By default b
 
         } while (false);
     }
+    catch (boost::program_options::invalid_option_value& e) {
+        std::cerr << e.what() << std::endl;
+        errorCode = ERROR_INVALID_FUNCTION;
+    }
+    catch (boost::program_options::unknown_option& e) {
+        std::cerr << e.what() << std::endl;
+        errorCode = ERROR_INVALID_FUNCTION;
+    }
     catch (SignatureGeneratorException& e) {
         std::cerr << e.What() << std::endl;
         errorCode = e.ErrorCode();
     }
-    catch (boost::exception&) {
-        std::cerr << "Boost library exception occured. Please, report a bug\n";
+    catch (boost::exception& e) {
+        std::cerr << "Boost library exception occured. Please, report a bug" << std::endl;
+        std::cerr << "Exception description: " << boost::diagnostic_information(e) << std::endl;
         errorCode = ERROR_INVALID_FUNCTION;
     }
     catch (std::bad_alloc& e) {
-        std::cerr << "Bad allocation. Try varying the size of the block\n";
+        std::cerr << "Bad allocation. Try varying the size of the block" << std::endl;
         std::cerr << "Exception description: " << e.what() << std::endl;
         errorCode = ERROR_NOT_ENOUGH_MEMORY;
     }
     catch (std::exception& e) {
-        std::cerr << "Standart library exception occured. Please, report a bug\n";
-        std::wcerr << "Exception description: " << e.what() << "\n";
+        std::cerr << "Standart library exception occured. Please, report a bug" << std::endl;
+        std::cerr << "Exception description: " << e.what() << std::endl;
         errorCode = ERROR_INVALID_FUNCTION;
     }
     catch (...) {
-        std::wcerr << "Exception of unknown type!\n";
+        std::cerr << "Exception of unknown type!" << std::endl;
         errorCode = ERROR_INVALID_FUNCTION;
     }
     return errorCode;

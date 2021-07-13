@@ -8,27 +8,34 @@ SignatureGenerator::SignatureGenerator(const std::string inputFilePath, const st
     inputFile.open(inputFilePath, std::ios::in | std::ios::binary);
     if (!inputFile) throw SignatureGeneratorException("Cannot open input file", ERROR_FILE_NOT_FOUND);
     outputFile.open(outputFilePath, std::ios::out | std::ios::trunc | std::ios::binary);
-    if (!outputFile) throw SignatureGeneratorException("Cannot create output file. Is path to the file exist?", ERROR_PATH_NOT_FOUND);
+    if (!outputFile) throw SignatureGeneratorException("Cannot create output file. Does path exist?", ERROR_PATH_NOT_FOUND);
+    if (blockSize == 0) throw SignatureGeneratorException("Block size must be greater than zero", ERROR_INVALID_DATA);
 
     inputFileSize = boost::filesystem::file_size(inputFilePath);
+    if (inputFileSize == 0) throw SignatureGeneratorException("Input file is empty", ERROR_INVALID_DATA);
     blocksCount = static_cast<uint64_t>(ceil((double)inputFileSize / (double)blockSize));
     const unsigned int cores = std::thread::hardware_concurrency();
     numOfCores = (cores == 0) ? DEFAULT_NUM_OF_CORES : cores;
-
-    blocksPool.Init("SignGen_semaphore", numOfCores * Q_RESERVATION_MULT);
-
-    for (uint32_t i = 0; i < blocksPool.GetMaxItems(); ++i) {
-        auto block = std::make_shared<Block>(i, blockSize);
-        blocksPool.Release(block); // Add block to the pool
-    }
-
-    hashes.resize(static_cast<size_t>(blocksCount));
 
     const uint64_t outputFileSize = blocksCount * HASH_SIZE;
     const auto free = boost::filesystem::space(outputFilePath).free;
     if (free < outputFileSize) {
         throw SignatureGeneratorException("Not enough disk space for creating output signature file", ERROR_OUTOFMEMORY);
     }
+
+    // Assuming Blocks Pool can consume no more than 1.5 GB of process memory
+    if (static_cast<uint64_t>(numOfCores) * static_cast<uint64_t>(Q_RESERVATION_MULT) * blockSize > BLOCKS_POOL_MEM_LIMIT) {
+        throw SignatureGeneratorException("Please, reduce the block size", ERROR_INVALID_DATA);
+    }
+
+    blocksPool.Init("SignGen_semaphore", numOfCores * Q_RESERVATION_MULT);
+
+    for (uint32_t i = 0; i < blocksPool.GetMaxItems(); ++i) {
+        auto block = std::make_shared<Block>(i, static_cast<size_t>(blockSize));
+        blocksPool.Release(block); // Add block to the pool
+    }
+
+    hashes.resize(static_cast<size_t>(blocksCount));
 }
 
 SignatureGenerator::~SignatureGenerator()
