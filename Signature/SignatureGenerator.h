@@ -5,6 +5,7 @@
 #include <array>
 #include <queue>
 #include <sha256.h>
+#include <boost/thread.hpp>
 #include "Pool.h"
 
 #define KB 1024ULL
@@ -26,7 +27,9 @@ struct Block
 // Hash structure allows to track whether a specific hash has been calculated
 struct Hash
 {
-    std::atomic<bool> ready = false;
+    boost::mutex mx;
+    boost::condition_variable cv;
+    bool ready = false;
     std::array<unsigned char, CSHA256::OUTPUT_SIZE> hash;
 
     Hash() : hash{ 0 } {}

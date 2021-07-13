@@ -63,14 +63,13 @@ void SignatureGenerator::ReadFileThread()
 void SignatureGenerator::WriteFileThread()
 {
     for (int i = 0; i < blocksCount; ++i) {
-        if (hashes[i].ready) {
-            outputFile.write((char*)hashes[i].hash.data(), HASH_SIZE);
-            ShowProgress(static_cast<float>(i) / (static_cast<float>(blocksCount) - 1));
+        boost::unique_lock<boost::mutex> lk(hashes[i].mx);
+        while (!hashes[i].ready) {
+            hashes[i].cv.wait(lk);
         }
-        else {
-            i--;
-            std::this_thread::yield();
-        }
+
+        outputFile.write((char*)hashes[i].hash.data(), HASH_SIZE);
+        ShowProgress(static_cast<float>(i) / (static_cast<float>(blocksCount) - 1));
     }
     writeCompleted = true;
 }
@@ -103,6 +102,12 @@ void SignatureGenerator::HashingThread()
 
             hash.ready = true;
             blocksPool.Release(block);
+
+            {
+                boost::lock_guard<boost::mutex> lk(hash.mx);
+                hash.ready = true;
+                hash.cv.notify_all();
+            }
         }
     }
 }
