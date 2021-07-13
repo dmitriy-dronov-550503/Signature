@@ -24,9 +24,6 @@
     <ClCompile Include="Signature.cpp">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
-    <ClCompile Include="md5.cpp">
-      <Filter>Исходные файлы</Filter>
-    </ClCompile>
     <ClCompile Include="sha256\hkdf_sha256_32.cpp">
       <Filter>Исходные файлы\sha256</Filter>
     </ClCompile>
@@ -59,9 +56,6 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="md5.h">
-      <Filter>Файлы заголовков</Filter>
-    </ClInclude>
     <ClInclude Include="sha256\common.h">
       <Filter>Файлы заголовков\sha256</Filter>
     </ClInclude>
